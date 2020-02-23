@@ -36,7 +36,7 @@
     "body-parser": "^1.17.1",
     "botbuilder": "^4.4.0",
     "botbuilder-adapter-facebook": "^1.0.3",
-    "botkit": "^4.0.2",
+    "botkit": "^4.6.2",
     "debug": "^4.1.1",
     "dotenv": "^4.0.0",
     "express": "^4.16.4",
