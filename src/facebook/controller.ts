@@ -1,12 +1,16 @@
-import { FacebookAdapter } from 'botbuilder-adapter-facebook';
-import { debugFacebook, debugRequest, debugResponse } from '../debuggers';
+import { FacebookAdapter } from 'botbuilder-adapter-facebook-erxes';
+import { debugBase, debugFacebook, debugRequest, debugResponse } from '../debuggers';
 import Accounts from '../models/Accounts';
 import Integrations from '../models/Integrations';
-import { getEnv, sendRequest } from '../utils';
+import { getConfig, getEnv, sendRequest } from '../utils';
 import loginMiddleware from './loginMiddleware';
-import { Conversations } from './models';
+import { Comments, Customers, Posts } from './models';
+import receiveComment from './receiveComment';
 import receiveMessage from './receiveMessage';
-import { getPageAccessToken, getPageList, graphRequest, subscribePage } from './utils';
+import receivePost from './receivePost';
+
+import { FACEBOOK_POST_TYPES } from './constants';
+import { getPageAccessToken, getPageAccessTokenFromMap, getPageList, subscribePage } from './utils';
 
 const init = async app => {
   app.get('/fblogin', loginMiddleware);
@@ -14,18 +18,14 @@ const init = async app => {
   app.post('/facebook/create-integration', async (req, res, next) => {
     debugRequest(debugFacebook, req);
 
-    const { accountId, integrationId, data } = req.body;
+    const { accountId, integrationId, data, kind } = req.body;
+
     const facebookPageIds = JSON.parse(data).pageIds;
 
-    const account = await Accounts.findOne({ _id: accountId });
-
-    if (!account) {
-      debugFacebook('Account not found');
-      return next(new Error('Account not found'));
-    }
+    const account = await Accounts.getAccount({ _id: accountId });
 
     const integration = await Integrations.create({
-      kind: 'facebook',
+      kind,
       accountId,
       erxesApiId: integrationId,
       facebookPageIds,
@@ -40,35 +40,44 @@ const init = async app => {
       // send domain to core endpoints
       try {
         await sendRequest({
-          url: ENDPOINT_URL,
+          url: `${ENDPOINT_URL}/register-endpoint`,
           method: 'POST',
           body: {
             domain: DOMAIN,
             facebookPageIds,
+            fbPageIds: facebookPageIds,
           },
         });
       } catch (e) {
-        await Integrations.remove({ _id: integration._id });
+        await Integrations.deleteOne({ _id: integration._id });
         return next(e);
       }
+    }
 
-      for (const pageId of facebookPageIds) {
+    const facebookPageTokensMap: { [key: string]: string } = {};
+
+    for (const pageId of facebookPageIds) {
+      try {
+        const pageAccessToken = await getPageAccessToken(pageId, account.token);
+
+        facebookPageTokensMap[pageId] = pageAccessToken;
+
         try {
-          const pageAccessToken = await getPageAccessToken(pageId, account.token);
-
-          try {
-            await subscribePage(pageId, pageAccessToken);
-            debugFacebook(`Successfully subscribed page ${pageId}`);
-          } catch (e) {
-            debugFacebook(`Error ocurred while trying to subscribe page ${e.message}`);
-            return next(e);
-          }
+          await subscribePage(pageId, pageAccessToken);
+          debugFacebook(`Successfully subscribed page ${pageId}`);
         } catch (e) {
-          debugFacebook(`Error ocurred while trying to get page access token with ${e.message}`);
+          debugFacebook(`Error ocurred while trying to subscribe page ${e.message || e}`);
           return next(e);
         }
+      } catch (e) {
+        debugFacebook(`Error ocurred while trying to get page access token with ${e.message || e}`);
+        return next(e);
       }
     }
+
+    integration.facebookPageTokensMap = facebookPageTokensMap;
+
+    await integration.save();
 
     debugResponse(debugFacebook, req);
 
@@ -78,11 +87,7 @@ const init = async app => {
   app.get('/facebook/get-pages', async (req, res, next) => {
     debugRequest(debugFacebook, req);
 
-    const account = await Accounts.findOne({ _id: req.query.accountId });
-
-    if (!account) {
-      return next(new Error('Account not found'));
-    }
+    const account = await Accounts.getAccount({ _id: req.query.accountId });
 
     const accessToken = account.token;
 
@@ -100,83 +105,179 @@ const init = async app => {
     return res.json(pages);
   });
 
-  app.post('/facebook/reply', async (req, res, next) => {
-    debugRequest(debugFacebook, req);
+  app.get('/facebook/get-post', async (req, res) => {
+    debugFacebook(`Request to get post data with: ${JSON.stringify(req.query)}`);
 
-    const { integrationId, conversationId, content, attachments } = req.body;
+    const { erxesApiId } = req.query;
 
-    const integration = await Integrations.findOne({ erxesApiId: integrationId });
+    const post = await Posts.getPost({ erxesApiId }, true);
 
-    if (!integration) {
-      debugFacebook('Integration not found');
-      return next(new Error('Integration not found'));
+    return res.json({
+      ...post,
+    });
+  });
+
+  app.get('/facebook/get-comments-count', async (req, res) => {
+    debugFacebook(`Request to get post data with: ${JSON.stringify(req.query)}`);
+
+    const { postId, isResolved = false } = req.query;
+
+    const post = await Posts.getPost({ erxesApiId: postId }, true);
+
+    const commentCount = await Comments.countDocuments({ postId: post.postId, isResolved });
+    const commentCountWithoutReplies = await Comments.countDocuments({
+      postId: post.postId,
+      isResolved,
+      parentId: null,
+    });
+
+    return res.json({
+      commentCount,
+      commentCountWithoutReplies,
+    });
+  });
+
+  app.get('/facebook/get-customer-posts', async (req, res) => {
+    debugFacebook(`Request to get customer post data with: ${JSON.stringify(req.query)}`);
+
+    const { customerId } = req.query;
+
+    const customer = await Customers.findOne({ erxesApiId: customerId });
+
+    if (!customer) {
+      return res.end();
     }
 
-    const account = await Accounts.findOne({ _id: integration.accountId });
-
-    if (!account) {
-      debugFacebook('Account not found');
-      return next(new Error('Account not found'));
-    }
-
-    const conversation = await Conversations.findOne({ erxesApiId: conversationId });
-
-    if (!conversation) {
-      debugFacebook('Conversation not found');
-      return next(new Error('Conversation not found'));
-    }
-
-    let pageAccessToken;
-
-    try {
-      pageAccessToken = await getPageAccessToken(conversation.recipientId, account.token);
-    } catch (e) {
-      debugFacebook(`Error ocurred while trying to get page access token with ${e.message}`);
-      return next(e);
-    }
-
-    let attachment;
-
-    if (attachments && attachments.length > 0) {
-      attachment = {
-        type: 'file',
-        payload: {
-          url: attachments[0].url,
+    const result = await Comments.aggregate([
+      { $match: { senderId: customer.userId } },
+      { $lookup: { from: 'posts_facebooks', localField: 'postId', foreignField: 'postId', as: 'post' } },
+      {
+        $unwind: {
+          path: '$post',
+          preserveNullAndEmptyArrays: true,
         },
-      };
-    }
-
-    const data = {
-      recipient: { id: conversation.senderId },
-      message: {
-        text: content,
-        attachment,
       },
+      {
+        $addFields: {
+          conversationId: '$post.erxesApiId',
+        },
+      },
+      {
+        $project: { _id: 0, conversationId: 1 },
+      },
+    ]);
+
+    const conversationIds = result.map(conv => conv.conversationId);
+
+    return res.send(conversationIds);
+  });
+
+  app.get('/facebook/get-comments', async (req, res) => {
+    debugFacebook(`Request to get comments with: ${JSON.stringify(req.query)}`);
+
+    const { postId, commentId, senderId, isResolved } = req.query;
+
+    const post = await Posts.getPost({ erxesApiId: postId });
+
+    const query: { postId: string; isResolved?: boolean; parentId?: string; senderId?: string } = {
+      postId: post.postId,
     };
 
-    try {
-      const response = await graphRequest.post('me/messages', pageAccessToken, data);
-      debugFacebook(`Successfully sent data to facebook ${JSON.stringify(data)}`);
-      return res.json(response);
-    } catch (e) {
-      debugFacebook(`Error ocurred while trying to send post request to facebook ${e} data: ${JSON.stringify(data)}`);
-      return next(new Error(e));
+    query.isResolved = isResolved === 'false' ? false : true;
+
+    let { limit } = req.query;
+
+    limit = parseInt(limit, 10);
+
+    if (senderId !== 'undefined') {
+      const customer = await Customers.findOne({ erxesApiId: senderId });
+
+      if (!customer) {
+        return res.end();
+      }
+      query.senderId = customer.userId;
+    } else {
+      query.parentId = commentId !== 'undefined' ? commentId : null;
     }
+
+    const result = await Comments.aggregate([
+      {
+        $match: query,
+      },
+      {
+        $lookup: {
+          from: 'customers_facebooks',
+          localField: 'senderId',
+          foreignField: 'userId',
+          as: 'customer',
+        },
+      },
+      {
+        $unwind: {
+          path: '$customer',
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $lookup: {
+          from: 'posts_facebooks',
+          localField: 'postId',
+          foreignField: 'postId',
+          as: 'post',
+        },
+      },
+      {
+        $unwind: {
+          path: '$post',
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $lookup: {
+          from: 'comments_facebooks',
+          localField: 'commentId',
+          foreignField: 'parentId',
+          as: 'replies',
+        },
+      },
+      {
+        $addFields: {
+          commentCount: { $size: '$replies' },
+          'customer.avatar': '$customer.profilePic',
+          'customer._id': '$customer.erxesApiId',
+          conversationId: '$post.erxesApiId',
+        },
+      },
+
+      { $sort: { timestamp: -1 } },
+      { $limit: limit },
+    ]);
+
+    return res.json(result.reverse());
   });
 
   const accessTokensByPageId = {};
 
-  const adapter = new FacebookAdapter({
-    verify_token: process.env.FACEBOOK_VERIFY_TOKEN,
-    app_secret: process.env.FACEBOOK_APP_SECRET,
-    getAccessTokenForPage: async (pageId: string) => {
-      return accessTokensByPageId[pageId];
-    },
-  });
+  const getAdapter = async (): Promise<any> => {
+    const FACEBOOK_VERIFY_TOKEN = await getConfig('FACEBOOK_VERIFY_TOKEN');
+    const FACEBOOK_APP_SECRET = await getConfig('FACEBOOK_APP_SECRET');
+
+    if (!FACEBOOK_VERIFY_TOKEN || !FACEBOOK_APP_SECRET) {
+      return debugBase('Invalid facebook config');
+    }
+
+    return new FacebookAdapter({
+      verify_token: FACEBOOK_VERIFY_TOKEN,
+      app_secret: FACEBOOK_APP_SECRET,
+      getAccessTokenForPage: async (pageId: string) => {
+        return accessTokensByPageId[pageId];
+      },
+    });
+  };
 
   // Facebook endpoint verifier
-  app.get('/facebook/receive', (req, res) => {
-    const { FACEBOOK_VERIFY_TOKEN } = process.env;
+  app.get('/facebook/receive', async (req, res) => {
+    const FACEBOOK_VERIFY_TOKEN = await getConfig('FACEBOOK_VERIFY_TOKEN');
 
     // when the endpoint is registered as a webhook, it must echo back
     // the 'hub.challenge' value it receives in the query arguments
@@ -189,49 +290,87 @@ const init = async app => {
     }
   });
 
-  app.post('/facebook/receive', (req, res, next) => {
-    adapter
-      .processActivity(req, res, async context => {
-        const { activity } = context;
+  app.post('/facebook/receive', async (req, res, next) => {
+    const data = req.body;
 
-        if (activity.type === 'message') {
-          debugFacebook(`Received webhook activity ${JSON.stringify(activity)}`);
+    if (data.object !== 'page') {
+      return;
+    }
 
-          const pageId = activity.recipient.id;
+    const adapter = await getAdapter();
 
-          const integration = await Integrations.findOne({ facebookPageIds: { $in: [pageId] } });
+    for (const entry of data.entry) {
+      // receive chat
+      if (entry.messaging) {
+        debugFacebook(`Received messenger data ${JSON.stringify(data)}`);
 
-          if (!integration) {
-            debugFacebook(`Integration not found with pageId: ${pageId}`);
-            return next();
+        adapter
+          .processActivity(req, res, async context => {
+            const { activity } = await context;
+
+            if (!activity) {
+              next();
+            }
+
+            const pageId = activity.recipient.id;
+
+            const integration = await Integrations.getIntegration({
+              $and: [{ facebookPageIds: { $in: pageId } }, { kind: 'facebook-messenger' }],
+            });
+
+            await Accounts.getAccount({ _id: integration.accountId });
+
+            const { facebookPageTokensMap } = integration;
+
+            try {
+              accessTokensByPageId[pageId] = getPageAccessTokenFromMap(pageId, facebookPageTokensMap);
+            } catch (e) {
+              debugFacebook(`Error occurred while getting page access token: ${e.message}`);
+              return next();
+            }
+
+            await receiveMessage(activity);
+
+            debugFacebook(`Successfully saved activity ${JSON.stringify(activity)}`);
+          })
+
+          .catch(e => {
+            debugFacebook(`Error occurred while processing activity: ${e.message}`);
+            res.end('success');
+          });
+      }
+
+      // receive post and comment
+      if (entry.changes) {
+        for (const event of entry.changes) {
+          debugFacebook(`Received post data ${JSON.stringify(event.value)}`);
+
+          if (event.value.item === 'comment') {
+            try {
+              await receiveComment(event.value, entry.id);
+              debugFacebook(`Successfully saved  ${JSON.stringify(event.value)}`);
+              res.end('success');
+            } catch (e) {
+              debugFacebook(`Error processing comment: ${e.message}`);
+              res.end('success');
+            }
           }
 
-          const account = await Accounts.findOne({ _id: integration.accountId });
-
-          if (!account) {
-            debugFacebook(`Account not found with _id: ${integration.accountId}`);
-            return next();
+          if (FACEBOOK_POST_TYPES.includes(event.value.item)) {
+            try {
+              await receivePost(event.value, entry.id);
+              debugFacebook(`Successfully saved  ${JSON.stringify(event.value)}`);
+              res.end('success');
+            } catch (e) {
+              debugFacebook(`Error processing comment: ${e.message}`);
+              res.end('success');
+            }
+          } else {
+            res.end('success');
           }
-
-          try {
-            accessTokensByPageId[pageId] = await getPageAccessToken(pageId, account.token);
-          } catch (e) {
-            debugFacebook(`Error occurred while getting page access token: ${e.message}`);
-            return next();
-          }
-
-          await receiveMessage(adapter, activity);
-
-          debugFacebook(`Successfully saved activity ${JSON.stringify(activity)}`);
         }
-
-        next();
-      })
-
-      .catch(e => {
-        debugFacebook(`Error occurred while processing activity: ${e.message}`);
-        next();
-      });
+      }
+    }
   });
 };
 

@@ -1,18 +1,19 @@
 import * as graph from 'fbgraph';
 import { debugFacebook, debugRequest, debugResponse } from '../debuggers';
 import Accounts from '../models/Accounts';
-import { getEnv } from '../utils';
+import { getConfig, getEnv } from '../utils';
 import { graphRequest } from './utils';
 
-const loginMiddleware = (req, res) => {
-  const {
-    FACEBOOK_APP_ID,
-    FACEBOOK_APP_SECRET,
-    FACEBOOK_PERMISSIONS = 'manage_pages, pages_show_list, pages_messaging',
-  } = process.env;
+const loginMiddleware = async (req, res) => {
+  const FACEBOOK_APP_ID = await getConfig('FACEBOOK_APP_ID');
+  const FACEBOOK_APP_SECRET = await getConfig('FACEBOOK_APP_SECRET');
+  const FACEBOOK_PERMISSIONS = await getConfig(
+    'FACEBOOK_PERMISSIONS',
+    'pages_messaging,pages_manage_ads,pages_manage_engagement,pages_manage_metadata,pages_read_user_content',
+  );
 
-  const DOMAIN = getEnv({ name: 'DOMAIN' });
   const MAIN_APP_DOMAIN = getEnv({ name: 'MAIN_APP_DOMAIN' });
+  const DOMAIN = getEnv({ name: 'DOMAIN' });
 
   const conf = {
     client_id: FACEBOOK_APP_ID,
@@ -78,7 +79,7 @@ const loginMiddleware = (req, res) => {
       });
     }
 
-    const url = `${MAIN_APP_DOMAIN}/settings/integrations?fbAuthorized=true`;
+    const url = `${MAIN_APP_DOMAIN}/settings/authorization?fbAuthorized=true`;
 
     debugResponse(debugFacebook, req, url);
 

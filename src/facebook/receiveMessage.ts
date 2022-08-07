@@ -1,65 +1,23 @@
 import { Activity } from 'botbuilder';
-import { FacebookAdapter } from 'botbuilder-adapter-facebook';
+import { sendRPCMessage } from '../messageBroker';
 import Integrations from '../models/Integrations';
-import { fetchMainApi } from '../utils';
-import { ConversationMessages, Conversations, Customers } from './models';
+import { ConversationMessages, Conversations } from './models';
+import { getOrCreateCustomer } from './store';
+import { IChannelData } from './types';
 
-interface IChannelData {
-  sender: { id: string };
-  recipient: { id: string };
-  timestamp: number;
-  text?: string;
-  attachments?: Array<{
-    type: string;
-    payload: { url: string };
-  }>;
-  message: {
-    mid: string;
-  };
-}
-
-const receiveMessage = async (adapter: FacebookAdapter, activity: Activity) => {
+const receiveMessage = async (activity: Activity) => {
   const { recipient, sender, timestamp, text, attachments, message } = activity.channelData as IChannelData;
-  const integration = await Integrations.findOne({ facebookPageIds: { $in: [recipient.id] } });
 
-  if (!integration) {
-    return;
-  }
+  const integration = await Integrations.getIntegration({
+    $and: [{ facebookPageIds: { $in: [recipient.id] } }, { kind: 'facebook-messenger' }],
+  });
 
   const userId = sender.id;
+  const pageId = recipient.id;
+  const kind = 'facebook-messenger';
 
-  // get customer
-  let customer = await Customers.findOne({ userId });
-
-  // create customer
-  if (!customer) {
-    const api = await adapter.getAPI(activity);
-    const response = await api.callAPI(`/${userId}`, 'GET', {});
-
-    // save on api
-    const apiCustomerResponse = await fetchMainApi({
-      path: '/integrations-api',
-      method: 'POST',
-      body: {
-        action: 'create-customer',
-        payload: JSON.stringify({
-          integrationId: integration.erxesApiId,
-          firstName: response.first_name,
-          lastName: response.last_name,
-          avatar: response.profile_pic,
-        }),
-      },
-    });
-
-    // save on integrations db
-    customer = await Customers.create({
-      userId,
-      erxesApiId: apiCustomerResponse._id,
-      firstName: response.first_name,
-      lastName: response.last_name,
-      profilePic: response.profile_pic,
-    });
-  }
+  // get or create customer
+  const customer = await getOrCreateCustomer(pageId, userId, kind);
 
   // get conversation
   let conversation = await Conversations.findOne({
@@ -69,28 +27,43 @@ const receiveMessage = async (adapter: FacebookAdapter, activity: Activity) => {
 
   // create conversation
   if (!conversation) {
+    // save on integrations db
+    try {
+      conversation = await Conversations.create({
+        timestamp,
+        senderId: userId,
+        recipientId: recipient.id,
+        content: text,
+        integrationId: integration._id,
+      });
+    } catch (e) {
+      throw new Error(e.message.includes('duplicate') ? 'Concurrent request: conversation duplication' : e);
+    }
+
     // save on api
-    const apiConversationResponse = await fetchMainApi({
-      path: '/integrations-api',
-      method: 'POST',
-      body: {
-        action: 'create-conversation',
+    try {
+      const apiConversationResponse = await sendRPCMessage({
+        action: 'create-or-update-conversation',
         payload: JSON.stringify({
           customerId: customer.erxesApiId,
           integrationId: integration.erxesApiId,
-          content: text,
+          content: text || '',
+          attachments: (attachments || [])
+            .filter(att => att.type !== 'fallback')
+            .map(att => ({
+              type: att.type,
+              url: att.payload ? att.payload.url : '',
+            })),
         }),
-      },
-    });
+      });
 
-    // save on integrations db
-    conversation = await Conversations.create({
-      erxesApiId: apiConversationResponse._id,
-      timestamp,
-      senderId: userId,
-      recipientId: recipient.id,
-      content: text,
-    });
+      conversation.erxesApiId = apiConversationResponse._id;
+
+      await conversation.save();
+    } catch (e) {
+      await Conversations.deleteOne({ _id: conversation._id });
+      throw new Error(e);
+    }
   }
 
   // get conversation message
@@ -100,21 +73,24 @@ const receiveMessage = async (adapter: FacebookAdapter, activity: Activity) => {
 
   if (!conversationMessage) {
     // save on integrations db
-    await ConversationMessages.create({
-      conversationId: conversation._id,
-      mid: message.mid,
-      timestamp,
-      content: text,
-    });
+    try {
+      await ConversationMessages.create({
+        conversationId: conversation._id,
+        mid: message.mid,
+        timestamp,
+        content: text,
+      });
+    } catch (e) {
+      throw new Error(e.message.includes('duplicate') ? 'Concurrent request: conversation message duplication' : e);
+    }
 
     // save message on api
-    await fetchMainApi({
-      path: '/integrations-api',
-      method: 'POST',
-      body: {
+    try {
+      await sendRPCMessage({
         action: 'create-conversation-message',
+        metaInfo: 'replaceContent',
         payload: JSON.stringify({
-          content: text,
+          content: text || '',
           attachments: (attachments || [])
             .filter(att => att.type !== 'fallback')
             .map(att => ({
@@ -124,8 +100,11 @@ const receiveMessage = async (adapter: FacebookAdapter, activity: Activity) => {
           conversationId: conversation.erxesApiId,
           customerId: customer.erxesApiId,
         }),
-      },
-    });
+      });
+    } catch (e) {
+      await ConversationMessages.deleteOne({ mid: message.mid });
+      throw new Error(e);
+    }
   }
 };
 
