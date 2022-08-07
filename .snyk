@@ -1,0 +1,40 @@
+# Snyk (https://snyk.io) policy file, patches or ignores known vulnerabilities.
+version: v1.25.0
+ignore: {}
+# patches apply the minimum changes required to fix a vulnerability
+patch:
+  SNYK-JS-HTTPSPROXYAGENT-469131:
+    - '@google-cloud/pubsub > google-auth-library > gcp-metadata > gaxios > https-proxy-agent':
+        patched: '2022-08-07T03:57:44.464Z'
+    - '@google-cloud/pubsub > google-auth-library > gtoken > gaxios > https-proxy-agent':
+        patched: '2022-08-07T03:57:44.464Z'
+    - '@google-cloud/pubsub > google-gax > google-auth-library > gcp-metadata > gaxios > https-proxy-agent':
+        patched: '2022-08-07T03:57:44.464Z'
+    - '@google-cloud/pubsub > google-gax > google-auth-library > gtoken > gaxios > https-proxy-agent':
+        patched: '2022-08-07T03:57:44.464Z'
+  SNYK-JS-LODASH-567746:
+    - nylas > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - nylas > async > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - erxes-message-broker > cote > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - request-promise > request-promise-core > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - sinon > @sinonjs/samsam > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - sinon > @sinonjs/formatio > @sinonjs/samsam > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - botbuilder-adapter-facebook-erxes > botbuilder > botframework-connector > nock > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - botbuilder-adapter-facebook-erxes > botkit > botframework-connector > nock > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - erxes-message-broker > cote > portfinder > async > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - sinon > nise > @sinonjs/formatio > @sinonjs/samsam > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+    - botbuilder-adapter-facebook-erxes > botkit > botbuilder > botframework-connector > nock > lodash:
+        patched: '2022-08-07T03:57:44.464Z'
+  'npm:ms:20170412':
+    - smooch-core > jsonwebtoken > ms:
+        patched: '2022-08-07T03:57:44.464Z'
