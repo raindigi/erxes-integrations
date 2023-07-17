@@ -59,7 +59,7 @@
     "meteor-random": "^0.0.3",
     "migrate": "^1.6.2",
     "mongodb-memory-server": "^6.6.0",
-    "mongoose": "5.7.5",
+    "mongoose": "5.13.20",
     "nylas": "^4.7.0",
     "redis": "^2.8.0",
     "request": "^2.88.0",
